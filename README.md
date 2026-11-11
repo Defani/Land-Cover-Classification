@@ -88,10 +88,22 @@ columns the classified ones; kappa is (pₒ − pₑ)/(1 − pₑ).
 
 ## Requirements
 
-RustGIS newer than 0.6.0: the panel uses dropdowns and picks on the map, which RustGIS 0.6.0
-doesn't know (it refuses the plugin). The [web app](https://web.rustgis.app) has them today;
-the desktop app from its next release. The tools, the classification passes and Add Results to
-Map were also tested in `rustgis-cli` 0.6.0 with the panel left out of the manifest.
+RustGIS newer than 0.6.0 for the panel above: it uses dropdowns, dialogs and picks on the map,
+which RustGIS 0.6.0 doesn't know (it refuses the plugin). The [web app](https://web.rustgis.app)
+has them today; the desktop app from its next release.
+
+**For RustGIS 0.6.0** there is a variant, `land-cover-classification-<version>-rustgis-0.6.0.rgplugin`
+(`python scripts/manifest.py --compat <folder>/plugin.json` writes its manifest; the module is
+the same). Its panel has the same tools and settings in trees, sliders and checkboxes, and
+samples are drawn with RustGIS's own tools:
+
+1. Choose a class in the **Draw samples of** tree (13 common classes: Water, Vegetation,
+   Built-up, Bare land, Mangrove, Cropland, Rice field, Plantation, Shrubland, Grassland,
+   Wetland, Cloud, Shadow).
+2. **Draw Points** or **Draw Polygons** turns on RustGIS's Create tool on the sample layer:
+   click the map for points; click each corner and double-click for a polygon.
+   **View as Rectangle** adds the map's view (zoomed in, under 5 km) as a rectangle.
+3. Choose the next class: what you drew gets the class before it (so does Classify).
 
 ## Develop
 

@@ -39,6 +39,10 @@ fn handle(mut req: Request) -> Result<Value, String> {
         (Kind::Tool, "assess") => assess_tool(&mut req),
         (Kind::Command, "panel-state") => panel_state(&req, None),
         (Kind::Command, "new-class") => new_class(&req),
+        (Kind::Command, "choose-class") => choose_class(&req),
+        (Kind::Command, "draw-points") => draw(&req, false),
+        (Kind::Command, "draw-polygons") => draw(&req, true),
+        (Kind::Command, "view-box") => view_box(&req),
         (Kind::Command, "add-point") => add_point(&req),
         (Kind::Command, "add-rectangle") => add_rectangle(&req),
         (Kind::Command, "add-vertex") => add_vertex(&req),
@@ -404,13 +408,33 @@ fn assess_tool(req: &mut Request) -> Result<Value, String> {
 
 // ---- Panel: classes and samples ---------------------------------------------------------------
 
-/// The classes a new project starts with.
-fn default_classes() -> Vec<ClassInfo> {
-    [("Water", [31, 120, 180]), ("Vegetation", [51, 160, 44]), ("Built-up", [227, 26, 28]), ("Bare land", [253, 191, 111])]
-        .iter()
+/// The classes a new project starts with. The panel for RustGIS 0.6.0, which has no dialog to
+/// name a new class, offers more.
+fn default_classes(more: bool) -> Vec<ClassInfo> {
+    let base: &[(&str, [u8; 3])] =
+        &[("Water", [31, 120, 180]), ("Vegetation", [51, 160, 44]), ("Built-up", [227, 26, 28]), ("Bare land", [253, 191, 111])];
+    let extra: &[(&str, [u8; 3])] = &[
+        ("Mangrove", [0, 109, 44]),
+        ("Cropland", [230, 171, 2]),
+        ("Rice field", [166, 217, 106]),
+        ("Plantation", [102, 166, 30]),
+        ("Shrubland", [178, 223, 138]),
+        ("Grassland", [217, 240, 163]),
+        ("Wetland", [128, 177, 211]),
+        ("Cloud", [240, 240, 240]),
+        ("Shadow", [64, 64, 64]),
+    ];
+    base.iter()
+        .chain(if more { extra.iter() } else { [].iter() })
         .enumerate()
         .map(|(i, (l, c))| ClassInfo { value: (i + 1) as u8, label: l.to_string(), color: *c })
         .collect()
+}
+
+/// Whether the request comes from the panel for RustGIS 0.6.0 (trees, sliders and checkboxes
+/// instead of dropdowns, dialogs and picks; samples drawn with RustGIS's own Create tool).
+fn compat(req: &Request) -> bool {
+    req.panel.contains_key("drawing")
 }
 
 /// A class as a dropdown option's id: `value|label|#rrggbb`, so the option chosen says all of it.
@@ -476,7 +500,7 @@ fn layer_classes(layers: &[(String, bool)]) -> Vec<(ClassInfo, usize, usize)> {
 /// they don't use, and the one chosen (a new class, until it has samples).
 fn panel_classes(req: &Request, sampled: &[(ClassInfo, usize, usize)]) -> Vec<ClassInfo> {
     let mut classes: Vec<ClassInfo> = sampled.iter().map(|c| c.0.clone()).collect();
-    for d in default_classes() {
+    for d in default_classes(compat(req)) {
         if !classes.iter().any(|c| c.value == d.value || c.label.eq_ignore_ascii_case(&d.label)) {
             classes.push(d);
         }
@@ -498,9 +522,13 @@ fn active_class(req: &Request) -> Result<ClassInfo, String> {
     panel_classes(req, &layer_classes(&layers)).into_iter().next().ok_or_else(|| "add a class first (New Class)".into())
 }
 
-fn sample_summary(sampled: &[(ClassInfo, usize, usize)]) -> String {
+fn sample_summary(sampled: &[(ClassInfo, usize, usize)], old: bool) -> String {
     if sampled.is_empty() {
-        return "No samples yet. Choose a class, then Point, Rectangle or Polygon Vertex, and click the map.".into();
+        return if old {
+            "No samples yet. Choose a class, then Draw Points or Draw Polygons and draw on the map; choose the next class when done.".into()
+        } else {
+            "No samples yet. Choose a class, then Point, Rectangle or Polygon Vertex, and click the map.".into()
+        };
     }
     sampled.iter().map(|(c, p, g)| format!("{} {}: {p} point(s), {g} polygon(s)", c.value, c.label)).collect::<Vec<_>>().join("\n")
 }
@@ -519,42 +547,94 @@ fn ps<'a>(req: &'a Request, id: &str) -> Option<&'a str> {
 }
 
 /// Which classifier settings apply to which algorithm.
-fn setting_visibility(algorithm: classify::Algorithm) -> Vec<(&'static str, bool)> {
+fn setting_visibility(algorithm: classify::Algorithm, old: bool) -> Vec<(&'static str, bool)> {
     use classify::Algorithm as A;
     let forest = matches!(algorithm, A::RandomForest | A::Cart);
-    vec![
+    let svm = algorithm == A::Svm;
+    let mut v = vec![
         ("trees", algorithm == A::RandomForest),
         ("variables", algorithm == A::RandomForest),
         ("min-leaf", forest),
         ("max-depth", forest),
-        ("kernel", algorithm == A::Svm),
-        ("cost", algorithm == A::Svm),
-        ("gamma", algorithm == A::Svm),
         ("neighbours", algorithm == A::Knn),
-    ]
+    ];
+    if old {
+        v.extend([("linear", svm), ("cost-step", svm), ("gamma-step", svm)]);
+    } else {
+        v.extend([("kernel", svm), ("cost", svm), ("gamma", svm)]);
+    }
+    v
 }
 
 fn panel_state(req: &Request, report: Option<&str>) -> Result<Value, String> {
+    // Samples drawn with RustGIS's own tool since the last call get the class being drawn.
+    let mut note = None;
+    if compat(req) {
+        let n = assign_pending(req)?;
+        if n > 0 {
+            note = Some(n);
+        }
+    }
     let layers = layer_names()?;
     let sampled = layer_classes(&layers);
     let classes = panel_classes(req, &sampled);
-    let options: Vec<Value> = classes.iter().map(|c| json!({"id": class_id(c), "label": format!("{} {}", c.value, c.label)})).collect();
+    let old = compat(req);
+    let count = |c: &ClassInfo| sampled.iter().find(|s| s.0.value == c.value).map_or(0, |s| s.1 + s.2);
+    let options: Vec<Value> = classes
+        .iter()
+        .map(|c| {
+            if old {
+                json!({"id": class_id(c), "label": format!("{} {}", c.value, c.label), "count": count(c)})
+            } else {
+                json!({"id": class_id(c), "label": format!("{} {}", c.value, c.label)})
+            }
+        })
+        .collect();
     let mut images: Vec<Value> = vec![json!({"id": "*", "label": "All visible raster layers"})];
     images.extend(layers.iter().filter(|l| l.1).map(|l| json!({"id": l.0, "label": l.0})));
+    let list = if old { "nodes" } else { "options" };
     let mut items = json!({
-        "class": {"options": options},
-        "samples": {"text": sample_summary(&sampled)},
-        "image": {"options": images},
+        "class": {list: options},
+        "samples": {"text": sample_summary(&sampled, old)},
+        "image": {list: images},
     });
     let algorithm = classify::Algorithm::parse(ps(req, "algorithm").unwrap_or("Random Forest"));
-    for (id, visible) in setting_visibility(algorithm) {
+    for (id, visible) in setting_visibility(algorithm, old) {
         items[id] = json!({"visible": visible});
+    }
+    if old {
+        let names = [
+            "Random Forest",
+            "Support Vector Machine",
+            "CART (Decision Tree)",
+            "k-Nearest Neighbors",
+            "Naive Bayes",
+            "Minimum Distance",
+            "Maximum Likelihood",
+        ];
+        items["algorithm"] = json!({"nodes": names.iter().map(|n| json!({"id": n})).collect::<Vec<_>>()});
+        let labels = |v: &[f64]| v.iter().map(|x| if *x == 0.0 { "auto".to_string() } else { x.to_string() }).collect::<Vec<_>>();
+        items["grid-step"] = json!({"labels": ["Finest raster", "Coarsest raster", "First raster"]});
+        items["cost-step"] = json!({"labels": labels(&COSTS)});
+        items["gamma-step"] = json!({"labels": labels(&GAMMAS)});
+        items["max-pixels-step"] = json!({"labels": labels(&MAX_PIXELS)});
+        items["drawing"] = json!({"visible": false});
     }
     if let Some(r) = report {
         items["report"] = json!({"text": r});
     }
+    if let Some(n) = note {
+        host::notify(&format!("{n} new sample(s) given their class"));
+    }
     let chosen = req.panel.get("class").and_then(Value::as_str).filter(|id| classes.iter().any(|c| class_id(c) == *id)).map(str::to_string);
-    let values = json!({"class": chosen.unwrap_or_else(|| class_id(&classes[0]))});
+    let chosen = chosen.unwrap_or_else(|| class_id(&classes[0]));
+    let mut values = json!({"class": chosen});
+    if old {
+        values["drawing"] = json!(class_from_id(&chosen).map_or(0, |c| c.value));
+        if req.panel.get("algorithm").is_none_or(Value::is_null) {
+            values["algorithm"] = json!("Random Forest");
+        }
+    }
     Ok(json!({"panel": {"items": items, "values": values}}))
 }
 
@@ -721,12 +801,132 @@ fn settings(req: &Request) -> Value {
     if let Some(k) = ps(req, "kernel") {
         p["svmKernel"] = json!(k);
     }
+    // The panel for RustGIS 0.6.0: steps of sliders and checkboxes.
+    let step = |id: &str, list: &[f64]| pv(req, id).map(|i| list[(i.max(0.0) as usize).min(list.len() - 1)]);
+    if let Some(i) = pv(req, "grid-step") {
+        p["grid"] = json!(["Finest raster", "Coarsest raster", "First raster"][(i.max(0.0) as usize).min(2)]);
+    }
+    if req.panel_bool("split-by-sample") == Some(true) {
+        p["splitBy"] = json!("Sample (whole polygon)");
+    }
+    if req.panel_bool("linear") == Some(true) {
+        p["svmKernel"] = json!("Linear");
+    }
+    if let Some(v) = step("cost-step", &COSTS) {
+        p["svmCost"] = json!(v);
+    }
+    if let Some(v) = step("gamma-step", &GAMMAS) {
+        p["svmGamma"] = json!(v);
+    }
+    if let Some(v) = step("max-pixels-step", &MAX_PIXELS) {
+        p["maxPixels"] = json!(v);
+    }
     p
+}
+
+/// The steps of the 0.6.0 panel's SVM cost, gamma and max-pixels sliders.
+pub const COSTS: [f64; 5] = [0.1, 1.0, 10.0, 100.0, 1000.0];
+pub const GAMMAS: [f64; 7] = [0.0, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0];
+pub const MAX_PIXELS: [f64; 6] = [100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0];
+
+// ---- Drawing with RustGIS's own tools (the panel for RustGIS 0.6.0) ---------------------------
+
+/// Gives the samples drawn with RustGIS's Create tool (which leave `class` empty) the class
+/// being drawn. Answers how many.
+fn assign_pending(req: &Request) -> Result<usize, String> {
+    let v = pv(req, "drawing").unwrap_or(0.0) as i64;
+    if !(1..=255).contains(&v) {
+        return Ok(0);
+    }
+    let layers = layer_names()?;
+    let classes = panel_classes(req, &layer_classes(&layers));
+    let Some(c) = classes.into_iter().find(|c| i64::from(c.value) == v) else { return Ok(0) };
+    let mut n = 0;
+    for layer in [POINTS, POLYGONS] {
+        if !has_layer(&layers, layer) {
+            continue;
+        }
+        let fc = host::features(layer, false)?;
+        for f in fc["features"].as_array().into_iter().flatten() {
+            if f["properties"]["class"].as_f64().is_some() {
+                continue;
+            }
+            let Some(row) = f["row"].as_u64() else { continue };
+            for (field, value) in [("class", json!(c.value)), ("label", json!(c.label)), ("color", json!(hex(c.color)))] {
+                host::call("edit.setValue", json!({"layer": layer, "row": row, "field": field, "value": value}))?;
+            }
+            n += 1;
+        }
+    }
+    if n > 0 {
+        style_samples(&layer_names()?, Some(&c));
+    }
+    Ok(n)
+}
+
+/// A class chosen: what was drawn so far gets the class before it, and drawing goes on in this one.
+fn choose_class(req: &Request) -> Result<Value, String> {
+    // `drawing` still holds the class drawn until now; the state answers the new one.
+    panel_state(req, None)
+}
+
+/// Makes `layer` (points or polygons) if it is missing: from a stand-in feature, removed at once,
+/// so the layer has its fields and geometry type for the Create tool.
+fn ensure_layer(layer: &str, polygons: bool) -> Result<(), String> {
+    if has_layer(&layer_names()?, layer) {
+        return Ok(());
+    }
+    let v = host::view()?;
+    let (lon, lat) = (v["center"][0].as_f64().unwrap_or(0.0), v["center"][1].as_f64().unwrap_or(0.0));
+    let g = if polygons {
+        let d = 1e-5;
+        geojson::polygon(&[[lon - d, lat - d], [lon + d, lat - d], [lon + d, lat + d], [lon - d, lat + d], [lon - d, lat - d]])
+    } else {
+        geojson::point(lon, lat)
+    };
+    host::add_layer(layer, geojson::collection(vec![geojson::feature(g, json!({"class": 0, "label": "", "color": ""}))]))?;
+    let _ = host::call("select.clear", json!({}));
+    host::call("select.byAttributes", json!({"layer": layer, "where": "class = 0"}))?;
+    host::call("edit.delete", json!({}))?;
+    Ok(())
+}
+
+/// Draw Points / Draw Polygons: the sample layer made active and RustGIS's Create tool on it.
+fn draw(req: &Request, polygons: bool) -> Result<Value, String> {
+    let layer = if polygons { POLYGONS } else { POINTS };
+    let mut state = panel_state(req, None)?;
+    ensure_layer(layer, polygons)?;
+    style_samples(&layer_names()?, None);
+    host::call("layer.select", json!({"layer": layer}))?;
+    host::call("tool.set", json!({"tool": if polygons { "createPolygon" } else { "createPoint" }}))?;
+    let c = active_class(req)?;
+    let how = if polygons { "click each corner, double-click to finish a polygon" } else { "click the map for each point" };
+    host::notify(&format!("Drawing {} samples: {how}. Choose another class in the panel when done.", c.label));
+    state["report"] = json!(format!("Drawing {} into {layer}: {how}", c.label));
+    Ok(state)
+}
+
+/// View as Rectangle: a rectangle sample of the chosen class covering the map's view.
+fn view_box(req: &Request) -> Result<Value, String> {
+    let e = host::call("map.extent", json!({}))?;
+    let b: Vec<f64> = e["extent"].as_array().ok_or("the view has no extent")?.iter().filter_map(Value::as_f64).collect();
+    if b.len() != 4 {
+        return Err("the view has no extent".into());
+    }
+    let km = (b[2] - b[0]) * 111.32 * ((b[1] + b[3]) / 2.0).to_radians().cos();
+    if km > 5.0 {
+        return Err(format!("the view is {km:.0} km wide: zoom in to the patch you want as a sample (under 5 km)"));
+    }
+    let _ = assign_pending(req)?;
+    add_sample(req, POLYGONS, geojson::polygon(&[[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]], [b[0], b[1]]]))
 }
 
 /// The panel's Classify: on the desktop, runs the Classify tool on the raster layers chosen (by
 /// their files) and the training layers, then puts the result on the map.
 fn run(req: &Request) -> Result<Value, String> {
+    if compat(req) {
+        assign_pending(req)?;
+    }
     let layers = layer_names()?;
     let image = ps(req, "image").unwrap_or("*");
     let chosen: Vec<String> = if image == "*" {

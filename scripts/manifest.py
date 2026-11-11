@@ -237,6 +237,69 @@ ID = {
 }
 MANIFEST["i18n"] = {"id": ID}
 
+def compat():
+    """The manifest for RustGIS 0.6.0, whose panels have texts, checkboxes, sliders, buttons and
+    trees only: classes and settings in trees and sliders, samples drawn with RustGIS's own
+    Create tool (Draw Points / Draw Polygons), no dialogs."""
+    m = json.loads(json.dumps(MANIFEST))
+    drop = {"new-class", "add-point", "add-rectangle", "add-vertex", "close-polygon"}
+    m["commands"] = [c for c in m["commands"] if c["id"] not in drop] + [
+        {"id": "choose-class", "label": "Choose Class", "help": "Draw the next samples in this class; those drawn so far keep theirs.", "icon": "unique"},
+        {"id": "draw-points", "label": "Draw Points", "help": "Turn on the Create tool on 'Training Points': click the map for each point.", "icon": "point_tool"},
+        {"id": "draw-polygons", "label": "Draw Polygons", "help": "Turn on the Create tool on 'Training Polygons': click each corner, double-click to finish.", "icon": "polygon_tool"},
+        {"id": "view-box", "label": "View as Rectangle", "help": "Add the map's view (zoomed in, under 5 km) as a rectangle sample.", "icon": "g_rect"},
+    ]
+
+    def slider(i, label, lo, hi, d):
+        return {"kind": "slider", "id": i, "label": label, "min": lo, "max": hi, "default": d, "steps": True}
+
+    m["panel"]["help"] = "Choose a class, draw its samples with Draw Points or Draw Polygons, choose the next class; set the classifier and see its accuracy."
+    m["panel"]["items"] = [
+        {"kind": "tree", "id": "class", "label": "Draw samples of", "command": "choose-class",
+         "help": "Samples drawn with RustGIS's Create tool get the class chosen here when you choose the next one (or classify)."},
+        {"kind": "button", "command": "draw-points"},
+        {"kind": "button", "command": "draw-polygons"},
+        {"kind": "button", "command": "view-box"},
+        {"kind": "text", "id": "samples", "label": "Samples", "text": "Open the panel to count the samples."},
+        slider("drawing", "Class being drawn", 0, 255, 0),
+        {"kind": "tree", "id": "image", "label": "Image (desktop)",
+         "help": "The band rasters Classify reads: raster layers read from files. In the web app, run Land Cover > Classify and pick the files."},
+        slider("grid-step", "Grid", 0, 2, 0),
+        {"kind": "tree", "id": "algorithm", "label": "Algorithm", "command": "panel-state"},
+        slider("split", "Training share (%)", 10, 100, 70),
+        {"kind": "checkbox", "id": "split-by-sample", "label": "Split by whole sample (not by pixel)"},
+        slider("trees", "Number of trees", 1, 500, 100),
+        slider("variables", "Variables per split (0 = square root of bands)", 0, 24, 0),
+        slider("min-leaf", "Min leaf population", 1, 50, 1),
+        slider("max-depth", "Max depth (0 = unlimited)", 0, 50, 0),
+        {"kind": "checkbox", "id": "linear", "label": "Linear SVM kernel (RBF when off)"},
+        slider("cost-step", "SVM cost (C)", 0, 4, 2),
+        slider("gamma-step", "SVM gamma", 0, 6, 0),
+        slider("neighbours", "k (neighbours)", 1, 50, 5),
+        slider("max-pixels-step", "Max pixels per sample", 0, 5, 2),
+        slider("seed", "Seed", 0, 1000, 42),
+        {"kind": "button", "command": "run"},
+        {"kind": "button", "command": "add-results"},
+        {"kind": "text", "id": "report", "label": "Accuracy", "text": "Run Classify to see the accuracy here."},
+    ]
+    for c in m["commands"]:
+        c.pop("form", None)
+    m["i18n"]["id"].update({
+        "Choose Class": "Pilih Kelas", "Draw Points": "Gambar Titik", "Draw Polygons": "Gambar Poligon",
+        "View as Rectangle": "Tampilan jadi Persegi", "Class being drawn": "Kelas yang digambar", "Image (desktop)": "Citra (desktop)",
+        "Split by whole sample (not by pixel)": "Split per sampel utuh (bukan per piksel)",
+        "Linear SVM kernel (RBF when off)": "Kernel SVM linear (RBF bila tidak dicentang)",
+    })
+    return m
+
+
 if __name__ == "__main__":
+    import sys
+
+    if "--compat" in sys.argv:
+        out = Path(sys.argv[sys.argv.index("--compat") + 1])
+        out.write_text(json.dumps(compat(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"{out}: the manifest for RustGIS 0.6.0")
+        raise SystemExit
     (ROOT / "plugin.json").write_text(json.dumps(MANIFEST, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"plugin.json: {len(CLASSIFY)}, {len(COMPOSITE)} and {len(ASSESS)} tool parameters")

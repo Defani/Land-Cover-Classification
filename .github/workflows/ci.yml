@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The RustGIS release the plugin is run in: the latest, unless the RUSTGIS_VERSION repository
+  # variable names one (v0.3.0).
+  RUSTGIS_VERSION: ${{ vars.RUSTGIS_VERSION }}
+
+jobs:
+  build:
+    name: Build, check and run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - name: Unit tests
+        run: cargo test
+      - name: Build, check and package
+        # --offline: the registry's checks (rustgis-plugins scripts/build.py) don't know the
+        # panel's map picks yet, which RustGIS's main branch and web app have. Drop it once they do.
+        run: python scripts/package.py --offline
+      - name: Download rustgis-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $RUSTGIS_VERSION --repo opengeos/RustGIS --pattern 'RustGIS-*-linux-x86_64.tar.gz' --dir "$RUNNER_TEMP"
+          tar xzf "$RUNNER_TEMP"/RustGIS-*-linux-x86_64.tar.gz -C "$RUNNER_TEMP"
+          echo "RUSTGIS_CLI=$(ls "$RUNNER_TEMP"/RustGIS-*-linux-x86_64/rustgis-cli)" >> "$GITHUB_ENV"
+      - name: Run the plugin in RustGIS
+        # RustGIS 0.6.0, the latest release, refuses the panel's dropdowns and picks: until a
+        # release has them this run is reported, not required.
+        continue-on-error: true
+        run: python scripts/smoke.py --cli "$RUSTGIS_CLI"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: dist/
+
+  # The template's own check that every starter builds and runs; skipped in your repository.
+  starters:
+    name: Starter ${{ matrix.starter }}
+    if: github.repository == 'opengeos/rustgis-plugin-template'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        starter: [commands, tab, panel, tools]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Use the starter
+        run: python scripts/setup.py --starter ${{ matrix.starter }} --id my-plugin --name "My Plugin"
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - name: Unit tests
+        run: cargo test
+      - name: Build, check and package
+        run: python scripts/package.py
+      - name: Download rustgis-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $RUSTGIS_VERSION --repo opengeos/RustGIS --pattern 'RustGIS-*-linux-x86_64.tar.gz' --dir "$RUNNER_TEMP"
+          tar xzf "$RUNNER_TEMP"/RustGIS-*-linux-x86_64.tar.gz -C "$RUNNER_TEMP"
+          echo "RUSTGIS_CLI=$(ls "$RUNNER_TEMP"/RustGIS-*-linux-x86_64/rustgis-cli)" >> "$GITHUB_ENV"
+      - name: Run the starter in RustGIS
+        run: python scripts/smoke.py --cli "$RUSTGIS_CLI" --strict

@@ -1,0 +1,64 @@
+name: Release
+
+# Push a tag that matches plugin.json's version to publish the plugin:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The release carries the .rgplugin package and the registry entry to submit.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTGIS_VERSION: ${{ vars.RUSTGIS_VERSION }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build, check and package
+        # --offline: the registry's checks (rustgis-plugins scripts/build.py) don't know the
+        # panel's map picks yet, which RustGIS's main branch and web app have. Drop it once they do.
+        run: python scripts/package.py --offline --tag "$GITHUB_REF_NAME"
+      - name: Download rustgis-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $RUSTGIS_VERSION --repo opengeos/RustGIS --pattern 'RustGIS-*-linux-x86_64.tar.gz' --dir "$RUNNER_TEMP"
+          tar xzf "$RUNNER_TEMP"/RustGIS-*-linux-x86_64.tar.gz -C "$RUNNER_TEMP"
+          echo "RUSTGIS_CLI=$(ls "$RUNNER_TEMP"/RustGIS-*-linux-x86_64/rustgis-cli)" >> "$GITHUB_ENV"
+      - name: Run the plugin in RustGIS
+        # RustGIS 0.6.0, the latest release, refuses the panel's dropdowns and picks: until a
+        # release has them this run is reported, not required.
+        continue-on-error: true
+        run: python scripts/smoke.py --cli "$RUSTGIS_CLI"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(python -c 'import json; print(json.load(open("plugin.json"))["id"])')
+          version="${GITHUB_REF_NAME#v}"
+          package="dist/$id-$version.rgplugin"
+          sha=$(sha256sum "$package" | cut -d' ' -f1)
+          {
+            echo "Install it in RustGIS from **Plugins › Plugin Manager › Settings › Install From File…**, or with \`rustgis-cli plugins install $id-$version.rgplugin\`."
+            echo
+            echo "SHA-256: \`$sha\`"
+            echo
+            echo "To list this version in the [RustGIS plugin registry](https://plugins.rustgis.app), add \`registry/$id.json\` to [opengeos/rustgis-plugins](https://github.com/opengeos/rustgis-plugins) (see the README):"
+            echo
+            echo '```json'
+            cat "dist/$id.json"
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" "$package" "dist/$id.json" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag

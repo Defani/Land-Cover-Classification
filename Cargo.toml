@@ -1,0 +1,27 @@
+[package]
+# The crate's name doesn't matter to RustGIS (the plugin's id is in plugin.json), but
+# scripts/setup.py sets it to the plugin's id.
+name = "land-cover-classification"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# A plugin is a WebAssembly module: build it with
+#   cargo build --release --target wasm32-unknown-unknown
+# ("rlib" too, so `cargo test` runs the unit tests on your own computer.)
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+miniz_oxide = "0.9.1"
+rustgis-plugin = { git = "https://github.com/opengeos/rustgis-plugins" }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+# Small, fast plugin modules. A panic aborts: RustGIS reports it as the plugin failing.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
